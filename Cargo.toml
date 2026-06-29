@@ -1,0 +1,36 @@
+[package]
+name = "ofd-viewer"
+version = "0.3.0"
+edition = "2021"
+description = "纯 Rust 的 OFD（开放版式文档）桌面查看器"
+authors = ["shaoyi1998"]
+repository = "https://github.com/shaoyi1998/ofd-viewer"
+license = "MIT"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.102"
+eframe = "0.34.3"
+image = "0.25.10"
+quick-xml = "0.40.1"
+rfd = "0.17.2"
+sys-locale = "0.3"
+tiny-skia = "0.12.0"
+zip = "8.6.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_Storage_Xps",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = "z"

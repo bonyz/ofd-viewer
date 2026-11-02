@@ -6,6 +6,8 @@ pub struct OfdDoc {
     pub pages: Vec<Page>,
     pub images: HashMap<String, ImageData>,
     pub fonts: HashMap<String, Vec<u8>>,
+    /// 声明未内嵌的字体：Font ID -> FontName（渲染时按名匹配系统字体）
+    pub font_names: HashMap<String, String>,
     /// 目录书签树（Document.xml Outlines，OutlineElem 递归）
     pub outlines: Vec<OutlineNode>,
     /// Document.xml 各 Page 的 ID 顺序（跳转 PageID -> 页索引用）
@@ -65,6 +67,8 @@ pub struct TextObj {
     pub stroke: bool,
     /// 描边线宽 mm
     pub line_width: f32,
+    /// 填充色（DrawParam FillColor，RGB）；None=默认黑
+    pub fill_color: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Default)]
@@ -80,4 +84,8 @@ pub struct PathObj {
     pub stroke: Option<String>,
     pub fill: Option<String>,
     pub line_width: f32,
+    /// 描边色（DrawParam StrokeColor，RGB）；None=默认黑
+    pub stroke_color: Option<[u8; 3]>,
+    /// 填充色（DrawParam FillColor，RGB）；None=默认黑
+    pub fill_color: Option<[u8; 3]>,
 }

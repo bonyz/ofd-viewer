@@ -18,6 +18,14 @@ sys-locale = "0.3"
 tiny-skia = "0.12.0"
 zip = "8.6.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = [
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "NSString",
+] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",

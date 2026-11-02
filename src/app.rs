@@ -295,7 +295,7 @@ fn short_name(path: &str) -> &str {
 
 /// 复制到系统剪贴板（Windows API 直写 CF_UNICODETEXT，绕过 arboard/egui 后端）
 #[cfg(windows)]
-fn copy_to_clipboard(txt: &str) -> bool {
+fn copy_to_clipboard(_ctx: &egui::Context, txt: &str) -> bool {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::*;
@@ -323,9 +323,11 @@ fn copy_to_clipboard(txt: &str) -> bool {
     }
 }
 
+/// 非 Windows：走 egui 的 copied_text 输出，eframe(winit) 在帧末写入系统剪贴板
 #[cfg(not(windows))]
-fn copy_to_clipboard(_txt: &str) -> bool {
-    false
+fn copy_to_clipboard(ctx: &egui::Context, txt: &str) -> bool {
+    ctx.copy_text(txt.to_owned());
+    true
 }
 
 /// tiny-skia Pixmap(premultiplied) -> egui ColorImage(unmultiplied)
@@ -359,6 +361,14 @@ fn pixmap_to_image(pm: &Pixmap) -> ColorImage {
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // macOS：第一帧安装 odoc AppleEvent 处理器 + 取走 Finder 双击的待打开文件
+        #[cfg(target_os = "macos")]
+        {
+            crate::mac_open::install_once();
+            for p in crate::mac_open::drain_opened() {
+                self.open_path(p);
+            }
+        }
         // Ctrl+F 查找
         if ui.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
             self.show_search = true;
@@ -373,7 +383,7 @@ impl eframe::App for ViewerApp {
         if copy_requested {
             match self.selected_text() {
                 Some(txt) => {
-                    if copy_to_clipboard(&txt) {
+                    if copy_to_clipboard(&ctx, &txt) {
                         self.status = format!(
                             "{}：{}…",
                             crate::i18n::pick(self.lang, "已复制", "Copied"),
@@ -404,6 +414,7 @@ impl eframe::App for ViewerApp {
             egui::Window::new(t.about)
                 .open(&mut self.show_about)
                 .resizable(false)
+                .default_pos(egui::pos2(120.0, 80.0))
                 .show(&ctx, |ui| {
                     ui.heading(format!("{}  v0.3.0", t.title));
                     ui.label(t.subtitle);
@@ -416,13 +427,16 @@ impl eframe::App for ViewerApp {
                 });
         }
 
-        // 查找对话框
+        // 查找对话框（默认位置放工具栏下方，避免盖住工具栏按钮）
         if self.show_search {
             let mut open = self.show_search;
             let t = crate::i18n::texts(self.lang);
             egui::Window::new(t.find)
                 .open(&mut open)
                 .resizable(false)
+                // 锚定在工具栏下方（每帧生效）：default_pos 会被 eframe 持久化的
+                // 旧窗口位置顶掉，导致窗口弹回左上角盖住工具栏
+                .anchor(egui::Align2::LEFT_TOP, [16.0, 48.0])
                 .show(&ctx, |ui| {
                     ui.horizontal(|ui| {
                         let resp = ui.text_edit_singleline(&mut self.search_query);
@@ -546,7 +560,7 @@ impl eframe::App for ViewerApp {
                     if ui.button(t.copy).clicked() {
                         match self.selected_text() {
                             Some(txt) => {
-                                if copy_to_clipboard(&txt) {
+                                if copy_to_clipboard(&ctx, &txt) {
                                     self.status = format!(
                                         "{}：{}…",
                                         crate::i18n::pick(self.lang, "已复制", "Copied"),
@@ -609,6 +623,20 @@ impl eframe::App for ViewerApp {
             ui.label(&self.status);
         });
 
+        // 左侧目录 / 书签：与工具栏/状态栏一样用 show_inside 注册到根 ui。
+        // egui 0.34 的面板 show_inside 会顺序收缩可用区域（cursor.min.x = 面板右缘），
+        // 后面的 CentralPanel::show_inside 取 available_rect_before_wrap 自动占剩余部分。
+        // 不能用 show(&ctx)：CentralPanel::show_inside 不感知 ctx 级面板，会被白底盖住。
+        if self.show_outline && !self.pages.is_empty() {
+            egui::SidePanel::left("outline")
+                .resizable(true)
+                .default_width(200.0)
+                .width_range(120.0..=400.0)
+                .show_inside(ui, |ui| {
+                    self.show_outline_panel(ui);
+                });
+        }
+
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if self.pages.is_empty() {
                 let t = crate::i18n::texts(self.lang);
@@ -621,18 +649,8 @@ impl eframe::App for ViewerApp {
                 return;
             }
 
-            // 左侧目录 / 书签
-            if self.show_outline {
-                egui::SidePanel::left("outline")
-                    .resizable(true)
-                    .default_width(200.0)
-                    .width_range(120.0..=400.0)
-                    .show_inside(ui, |ui| {
-                        self.show_outline_panel(ui);
-                    });
-            }
-
             let avail_h = ui.available_height().max(1.0);
+            let avail_w = ui.available_width().max(1.0);
             // Ctrl+滚轮缩放
             let zf = ui.input(|i| i.zoom_delta());
             if zf != 1.0 {
@@ -645,7 +663,6 @@ impl eframe::App for ViewerApp {
             if ui.input(|i| i.key_pressed(egui::Key::PageDown)) {
                 ui.input_mut(|i| i.smooth_scroll_delta.y += avail_h);
             }
-            let target_h = avail_h * self.zoom;
 
             // 命中（用上一帧 page_rects），更新选区
             let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -659,7 +676,7 @@ impl eframe::App for ViewerApp {
             // 右键直接复制当前选中
             if secondary {
                 if let Some(txt) = self.selected_text() {
-                    if copy_to_clipboard(&txt) {
+                    if copy_to_clipboard(&ctx, &txt) {
                         self.status = format!(
                             "{}：{}…",
                             crate::i18n::pick(self.lang, "已复制", "Copied"),
@@ -706,6 +723,10 @@ impl eframe::App for ViewerApp {
                 .show(ui, |ui| {
                     for (pi, tex) in self.pages.iter().enumerate() {
                         let ts = tex.size_vec2();
+                        // zoom=1 时整页适配窗口：高度适配与宽度适配取小者，
+                        // 横版页（如行程单 230x133.5mm）默认不再超宽
+                        let fit_h = (avail_h.min(avail_w * ts.y / ts.x)).max(1.0);
+                        let target_h = fit_h * self.zoom;
                         let tw = target_h * ts.x / ts.y;
                         let inner = ui.vertical_centered(|ui| {
                             ui.add(

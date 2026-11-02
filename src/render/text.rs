@@ -1,20 +1,108 @@
 //! 文字渲染：按 OFD 坐标栅格化贴到画布，应用 CTM 变换与 Stroke 描边（加粗）。
 use ab_glyph::{Font, FontVec, OutlinedGlyph, PxScale, ScaleFont};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tiny_skia::{Paint, Pixmap, Stroke, Transform};
 
 use crate::ofd::TextObj;
 
-const FONT_PATH: &str = r"C:\Windows\Fonts\simhei.ttf";
-
-pub fn load_default_font() -> Result<FontVec> {
-    let data = std::fs::read(FONT_PATH)
-        .with_context(|| format!("读取系统字体失败: {}", FONT_PATH))?;
-    FontVec::try_from_vec(data).context("字体格式无效")
+/// 系统兜底字体（需含 CJK），按平台依次尝试直到成功。
+/// 注意 PingFang.ttc 是 CFF2 轮廓，ab_glyph 解析不了，不要放进列表。
+pub fn default_font_candidates() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &[
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ]
+    } else if cfg!(target_os = "linux") {
+        &[
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        ]
+    } else {
+        &[r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\msyh.ttc"]
+    }
 }
 
-/// 把 glyph 像素（覆盖率 cov）填充到画布（白底黑字）
-fn paint_outline(pm: &mut Pixmap, outlined: &OutlinedGlyph, pw: i32, ph: i32) {
+/// 按文档声明的字体名匹配系统字体（OFD 未内嵌字体时用）。
+/// 命中不了返回 None，由调用方落到兜底字体。
+pub fn load_system_font_by_name(name: &str) -> Option<FontVec> {
+    let mut candidates: Vec<&'static str> = Vec::new();
+    if cfg!(target_os = "macos") {
+        let n = name.to_lowercase();
+        if n.contains("song") || name.contains('宋') {
+            candidates.push("/System/Library/Fonts/Supplemental/Songti.ttc");
+        } else if n.contains("hei") || name.contains('黑') {
+            candidates.push("/System/Library/Fonts/STHeiti Medium.ttc");
+            candidates.push("/System/Library/Fonts/STHeiti Light.ttc");
+        } else if n.contains("kai") || name.contains('楷') {
+            // Kaiti.ttc 部分系统没有，落到 Songti（细衬线，笔画粗细最接近楷体）
+            candidates.push("/System/Library/Fonts/Supplemental/Kaiti.ttc");
+            candidates.push("/System/Library/Fonts/Supplemental/Songti.ttc");
+        } else if n.contains("fang") || name.contains('仿') {
+            // macOS 无独立仿宋，落 Songti
+            candidates.push("/System/Library/Fonts/Supplemental/Songti.ttc");
+        } else if n.contains("courier") {
+            candidates.push("/System/Library/Fonts/Supplemental/Courier New.ttf");
+        } else if n.contains("times") {
+            candidates.push("/System/Library/Fonts/Supplemental/Times New Roman.ttf");
+        } else if n.contains("arial") {
+            candidates.push("/System/Library/Fonts/Supplemental/Arial.ttf");
+        }
+    } else if cfg!(target_os = "windows") {
+        let n = name.to_lowercase();
+        if n.contains("song") || name.contains('宋') {
+            candidates.push(r"C:\Windows\Fonts\simsun.ttc");
+        } else if n.contains("hei") || name.contains('黑') {
+            candidates.push(r"C:\Windows\Fonts\simhei.ttf");
+        } else if n.contains("kai") || name.contains('楷') {
+            candidates.push(r"C:\Windows\Fonts\simkai.ttf");
+        } else if n.contains("fang") || name.contains('仿') {
+            candidates.push(r"C:\Windows\Fonts\simfang.ttf");
+        } else if n.contains("courier") {
+            candidates.push(r"C:\Windows\Fonts\cour.ttf");
+        } else if n.contains("times") {
+            candidates.push(r"C:\Windows\Fonts\times.ttf");
+        }
+    } else {
+        // Linux：统一落 Noto CJK
+        candidates.push("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+    }
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            if let Ok(f) = FontVec::try_from_vec(data) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+pub fn load_default_font() -> Result<FontVec> {
+    let candidates = default_font_candidates();
+    let mut last: Option<anyhow::Error> = None;
+    for path in candidates {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                last = Some(anyhow::anyhow!("读取 {} 失败: {}", path, e));
+                continue;
+            }
+        };
+        // ttc 字体集合格式默认取 index 0，ab_glyph 自动处理
+        match FontVec::try_from_vec(data) {
+            Ok(f) => return Ok(f),
+            Err(e) => last = Some(anyhow::anyhow!("字体 {} 解析失败: {}", path, e)),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("未找到可用的系统中文字体")))
+}
+
+/// 把 glyph 像素（覆盖率 cov）填充到画布：白底向指定颜色过渡
+fn paint_outline(pm: &mut Pixmap, outlined: &OutlinedGlyph, pw: i32, ph: i32, color: [u8; 3]) {
     let bb = outlined.px_bounds();
     let (min_x, min_y) = (bb.min.x, bb.min.y);
     outlined.draw(|gx, gy, cov| {
@@ -27,11 +115,10 @@ fn paint_outline(pm: &mut Pixmap, outlined: &OutlinedGlyph, pw: i32, ph: i32) {
             return;
         }
         let idx = (p2y as usize * pm.width() as usize + p2x as usize) * 4;
-        let v = ((1.0 - cov) * 255.0) as u8;
         let dd = pm.data_mut();
-        dd[idx] = v;
-        dd[idx + 1] = v;
-        dd[idx + 2] = v;
+        dd[idx] = 255 - ((255 - color[0]) as f32 * cov) as u8;
+        dd[idx + 1] = 255 - ((255 - color[1]) as f32 * cov) as u8;
+        dd[idx + 2] = 255 - ((255 - color[2]) as f32 * cov) as u8;
     });
 }
 
@@ -52,6 +139,7 @@ pub fn draw_text(
     let chars: Vec<char> = t.text.chars().collect();
     let (pw, ph) = (pm.width() as i32, pm.height() as i32);
     let ax = a.abs().max(0.0001);
+    let color = t.fill_color.unwrap_or([0, 0, 0]);
 
     for (i, ch) in chars.iter().enumerate() {
         let mx = a * x_local + e;
@@ -62,21 +150,37 @@ pub fn draw_text(
         let used: &FontVec = if primary.glyph_id(*ch).0 != 0 { primary } else { fallback };
         let sx = (t.size * scale * a).abs().max(0.5);
         let sy = (t.size * scale * d).abs().max(0.5);
+        let gid = used.glyph_id(*ch);
         let scaled = used.as_scaled(PxScale { x: sx, y: sy });
 
-        // 填充
-        let mut g = scaled.scaled_glyph(*ch);
+        // 字符步进：优先文档 DeltaX（每字符到前一字符的位移），无则用自然宽度。
+        // 税务类 OFD 按"半角拉丁 0.5em"网格给 DeltaX 且不内嵌字体；实际字体更宽时
+        // 把字形横向压缩到步进内（h_scale = 步进/自然宽度，上限 1 不放大），
+        // 既不叠字也不溢出版式格子，观感等同官方半角宋体。
+        let natural_mm = scaled.h_advance(gid) / scale / ax;
+        let (step, condense) = if i < t.delta_x.len() {
+            let s = t.delta_x[i];
+            let c = if natural_mm > 0.0 && s > 0.0 { (s / natural_mm).min(1.0) } else { 1.0 };
+            (s, c)
+        } else {
+            (natural_mm, 1.0)
+        };
+        let sx_c = sx * condense;
+        let scaled_c = used.as_scaled(PxScale { x: sx_c, y: sy });
+
+        // 填充（横向按压缩比例）
+        let mut g = scaled_c.scaled_glyph(*ch);
         g.position = ab_glyph::point(px, py);
         if let Some(outlined) = used.outline_glyph(g) {
-            paint_outline(pm, &outlined, pw, ph);
+            paint_outline(pm, &outlined, pw, ph, color);
         }
         // 真描边（Stroke=true 加粗）：取 unscaled 轮廓曲线 → 缩放定位 → tiny-skia stroke
         if t.stroke && t.line_width > 0.0 {
             let upem = used.units_per_em().unwrap_or(1000.0).max(1.0);
-            let hf = sx / upem;
+            let hf = sx_c / upem;
             let vf = sy / upem;
             let to_screen = |p: ab_glyph::Point| (p.x * hf + px, -p.y * vf + py);
-            if let Some(outline) = used.outline(used.glyph_id(*ch)) {
+            if let Some(outline) = used.outline(gid) {
                 let mut pb = tiny_skia::PathBuilder::new();
                 for c in &outline.curves {
                     match c {
@@ -105,7 +209,7 @@ pub fn draw_text(
                 }
                 if let Some(path) = pb.finish() {
                     let mut paint = Paint::default();
-                    paint.set_color_rgba8(0, 0, 0, 255);
+                    paint.set_color_rgba8(color[0], color[1], color[2], 255);
                     paint.anti_alias = true;
                     let mut s = Stroke::default();
                     s.width = (t.line_width * scale).max(1.0);
@@ -114,11 +218,7 @@ pub fn draw_text(
             }
         }
 
-        if i < t.delta_x.len() {
-            x_local += t.delta_x[i];
-        } else {
-            x_local += scaled.h_advance(scaled.glyph_id(*ch)) / scale / ax;
-        }
+        x_local += step;
     }
     Ok(())
 }

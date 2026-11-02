@@ -8,13 +8,18 @@ pub fn draw_path(pm: &mut Pixmap, p: &PathObj, scale: f32, page_h_mm: f32) {
         Some(x) => x,
         None => return,
     };
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(0, 0, 0, 255);
-    paint.anti_alias = true;
+    let stroke_c = p.stroke_color.unwrap_or([0, 0, 0]);
+    let fill_c = p.fill_color.unwrap_or([0, 0, 0]);
 
     if p.fill.is_some() {
-        let _ = pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        let mut fpaint = Paint::default();
+        fpaint.set_color_rgba8(fill_c[0], fill_c[1], fill_c[2], 255);
+        fpaint.anti_alias = true;
+        let _ = pm.fill_path(&path, &fpaint, FillRule::Winding, Transform::identity(), None);
     }
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(stroke_c[0], stroke_c[1], stroke_c[2], 255);
+    paint.anti_alias = true;
     let mut s = Stroke::default();
     s.width = if p.line_width > 0.0 {
         p.line_width * scale

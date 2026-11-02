@@ -19,12 +19,21 @@ const MM_PER_INCH: f32 = 25.4;
 const A4_W_MM: f32 = 210.0;
 const A4_H_MM: f32 = 297.0;
 
-/// 加载字体表：嵌入子集字体 + 系统黑体 fallback（render 与 text_index 共用）
+/// 加载字体表：嵌入子集字体 + 按声明名匹配的系统字体 + 兜底字体
 pub fn load_font_table(doc: &OfdDoc) -> Result<(HashMap<String, FontVec>, FontVec)> {
     let fallback = text::load_default_font()?;
     let mut fonts: HashMap<String, FontVec> = HashMap::new();
     for (id, bytes) in &doc.fonts {
         if let Ok(f) = FontVec::try_from_vec(bytes.clone()) {
+            fonts.insert(id.clone(), f);
+        }
+    }
+    // 未内嵌的字体：按 FontName 匹配系统字体（税务类电子票据只声明"宋体"等名字）
+    for (id, name) in &doc.font_names {
+        if fonts.contains_key(id) {
+            continue;
+        }
+        if let Some(f) = text::load_system_font_by_name(name) {
             fonts.insert(id.clone(), f);
         }
     }

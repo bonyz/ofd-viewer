@@ -95,11 +95,13 @@ fn build_page_index(
             let ascent_mm = scaled.ascent() / scale;
             let descent_mm = scaled.descent().abs() / scale;
 
-            // 推进量（mm）：i<delta_x.len() 用 delta_x，否则 glyph advance（与 render 一致）
+            // 推进量（mm）：与 render 一致——有 DeltaX 用 DeltaX（渲染端会把字形横向
+            // 压缩到步进内，框选盒宽 = 步进 = 压缩后字形宽），无则用自然宽度
+            let natural_mm = scaled.h_advance(scaled.glyph_id(*ch)) / scale / ax;
             let advance_mm = if ci < t.delta_x.len() {
                 t.delta_x[ci]
             } else {
-                scaled.h_advance(scaled.glyph_id(*ch)) / scale / ax
+                natural_mm
             };
 
             chars.push(CharBox {
